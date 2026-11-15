@@ -21,7 +21,7 @@ A production-quality, full-stack Bus Booking Management System built on the MERN
 | 9 | Razorpay Payment Integration | ✅ Complete |
 | 10 | Booking History, Cancellation & Refunds | ✅ Complete |
 | 11 | Admin Dashboard & Reports | ✅ Complete |
-| 12 | Tests, Security & Documentation | 🔜 Next |
+| 12 | Tests, Security & Documentation | ✅ Complete |
 
 ---
 
