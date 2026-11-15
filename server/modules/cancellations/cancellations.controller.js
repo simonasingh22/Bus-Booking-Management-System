@@ -1,5 +1,6 @@
 const Cancellation = require('./Cancellation.model');
 const Booking = require('../bookings/Booking.model');
+const Payment = require('../payments/Payment.model');
 const Trip = require('../trips/Trip.model');
 const Seat = require('../seats/Seat.model');
 const Operator = require('../operators/Operator.model');
@@ -50,6 +51,27 @@ const evaluateCancellationPolicy = (departureDate, departureTime, policy, totalA
     refundAmount,
     ruleApplied,
   };
+};
+
+const simulateRefund = (amount) => {
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('Simulated refund amount must be greater than zero.');
+  }
+  return `REF-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+};
+
+const applyRefundToPayment = (payment, refundAmount, refundTransactionId, processedAt = new Date()) => {
+  if (!payment || payment.status !== 'captured') {
+    throw new Error('A captured payment is required before processing this refund.');
+  }
+  payment.status = 'refunded';
+  payment.refund = {
+    refundId: refundTransactionId,
+    amount: refundAmount,
+    status: 'processed',
+    processedAt,
+  };
+  return payment;
 };
 
 /**
@@ -116,6 +138,18 @@ const cancelBooking = asyncHandler(async (req, res, next) => {
     return next(new AppError('You do not have permission to cancel this booking.', 403));
   }
 
+  const existingCancellation = await Cancellation.findOne({ bookingId: booking._id }).sort({ createdAt: -1 });
+  if (existingCancellation) {
+    if (booking.bookingStatus === 'cancelled') {
+      return sendSuccess(res, 200, 'Booking cancellation already processed.', {
+        cancellation: existingCancellation,
+        booking,
+        duplicate: true,
+      });
+    }
+    return next(new AppError('Cancellation is already being processed for this booking.', 409));
+  }
+
   if (booking.bookingStatus === 'cancelled') {
     return next(new AppError('This booking has already been cancelled.', 400));
   }
@@ -137,9 +171,51 @@ const cancelBooking = asyncHandler(async (req, res, next) => {
     booking.totalAmount
   );
 
+  const payment = await Payment.findOne({ bookingId: booking._id });
+  let refundTransactionId = null;
+  if (refundAmount > 0) {
+    if (!payment || payment.status !== 'captured') {
+      return next(new AppError('A captured payment is required before processing this refund.', 409));
+    }
+    try {
+      // Test-mode refund: this creates no external gateway request.
+      refundTransactionId = simulateRefund(refundAmount);
+    } catch (error) {
+      return next(new AppError(error.message, 502));
+    }
+  }
+
   const seatNumbersToRelease = booking.passengers.map((p) => p.seatNumber);
 
-  // 2. RELEASE SEATS BACK TO AVAILABLE IN SEAT INVENTORY
+  // Create a pending record before changing financial state. If a later write fails,
+  // retries cannot issue a second refund and the pending record remains auditable.
+  const cancellation = await Cancellation.create({
+    bookingId: booking._id,
+    pnr: booking.pnr,
+    userId: booking.userId,
+    tripId: trip._id,
+    operatorId: booking.operatorId._id,
+    seatsCancelled: seatNumbersToRelease,
+    totalBookingAmount: booking.totalAmount,
+    cancellationCharge,
+    refundAmount,
+    refundPercentage,
+    refundStatus: refundAmount > 0 ? 'pending' : 'processed',
+    ...(refundTransactionId ? { refundTransactionId } : {}),
+    reason: reason || 'Customer requested cancellation',
+    policyDetails: {
+      hoursBeforeDeparture,
+      ruleApplied,
+    },
+    cancellationDate: new Date(),
+  });
+
+  if (refundAmount > 0) {
+    applyRefundToPayment(payment, refundAmount, refundTransactionId);
+    await payment.save();
+  }
+
+  // Release seats only after the simulated refund has succeeded.
   await Seat.updateMany(
     {
       tripId: trip._id,
@@ -159,8 +235,11 @@ const cancelBooking = asyncHandler(async (req, res, next) => {
   trip.availableSeats = Math.min(trip.totalSeats, trip.availableSeats + seatNumbersToRelease.length);
   await trip.save();
 
-  // 4. Update Booking Document
+  // Update booking financial state without changing the original total amount.
   booking.bookingStatus = 'cancelled';
+  if (refundAmount > 0) {
+    booking.paymentStatus = refundAmount >= booking.totalAmount ? 'refunded' : 'partially_refunded';
+  }
   booking.cancellation = {
     isCancelled: true,
     cancelledAt: new Date(),
@@ -171,28 +250,10 @@ const cancelBooking = asyncHandler(async (req, res, next) => {
   };
   await booking.save();
 
-  // 5. Create Cancellation / Refund Record
-  const cancellation = await Cancellation.create({
-    bookingId: booking._id,
-    pnr: booking.pnr,
-    userId: booking.userId,
-    tripId: trip._id,
-    operatorId: booking.operatorId._id,
-    seatsCancelled: seatNumbersToRelease,
-    totalBookingAmount: booking.totalAmount,
-    cancellationCharge,
-    refundAmount,
-    refundPercentage,
-    refundStatus: refundAmount > 0 ? 'processed' : 'none',
-    reason: reason || 'Customer requested cancellation',
-    policyDetails: {
-      hoursBeforeDeparture,
-      ruleApplied,
-    },
-    cancellationDate: new Date(),
-  });
+  cancellation.refundStatus = refundAmount > 0 ? 'processed' : 'processed';
+  await cancellation.save();
 
-  // 6. Record Immutable Audit Action
+  // Record immutable audit actions only once, after the cancellation is consistent.
   await logAuditAction({
     req,
     action: 'BOOKING_CANCEL',
@@ -200,9 +261,11 @@ const cancelBooking = asyncHandler(async (req, res, next) => {
     entityId: booking._id,
     details: {
       pnr: booking.pnr,
+      originalAmount: booking.totalAmount,
       seatsReleased: seatNumbersToRelease,
       refundAmount,
       cancellationCharge,
+      refundReference: refundTransactionId,
       ruleApplied,
     },
   });
@@ -217,6 +280,9 @@ const cancelBooking = asyncHandler(async (req, res, next) => {
         refundTransactionId: cancellation.refundTransactionId,
         amount: refundAmount,
         pnr: booking.pnr,
+        originalAmount: booking.totalAmount,
+        cancellationCharge,
+        refundReference: refundTransactionId,
       },
     });
   }
@@ -249,4 +315,6 @@ module.exports = {
   cancelBooking,
   getMyCancellations,
   evaluateCancellationPolicy,
+  simulateRefund,
+  applyRefundToPayment,
 };

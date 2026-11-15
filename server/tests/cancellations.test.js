@@ -1,6 +1,10 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
-const { evaluateCancellationPolicy } = require('../modules/cancellations/cancellations.controller');
+const {
+  evaluateCancellationPolicy,
+  simulateRefund,
+  applyRefundToPayment,
+} = require('../modules/cancellations/cancellations.controller');
 
 describe('Cancellations & Tiered Refund Policies Unit Tests', () => {
   const policy = {
@@ -76,5 +80,41 @@ describe('Cancellations & Tiered Refund Policies Unit Tests', () => {
     assert.strictEqual(seats[0].status, 'available');
     assert.strictEqual(seats[1].status, 'available');
     assert.strictEqual(tripAvailableSeats, 40, 'Available seats count must be incremented by released count');
+  });
+
+  it('should synchronize a captured payment with a successful simulated refund', () => {
+    const payment = {
+      amount: 1259,
+      status: 'captured',
+      refund: { status: 'none', amount: 0 },
+    };
+
+    const reference = simulateRefund(500);
+    applyRefundToPayment(payment, 500, reference);
+
+    assert.strictEqual(payment.amount, 1259, 'Original captured amount must be preserved');
+    assert.strictEqual(payment.status, 'refunded');
+    assert.strictEqual(payment.refund.amount, 500);
+    assert.strictEqual(payment.refund.status, 'processed');
+    assert.strictEqual(payment.refund.refundId, reference);
+  });
+
+  it('should not mark a refund processed when simulated refund validation fails', () => {
+    const payment = { amount: 1259, status: 'captured', refund: { status: 'none', amount: 0 } };
+
+    assert.throws(() => simulateRefund(0));
+    assert.strictEqual(payment.status, 'captured');
+    assert.strictEqual(payment.refund.status, 'none');
+  });
+
+  it('should reject a second refund for a payment that is no longer captured', () => {
+    const payment = {
+      amount: 1259,
+      status: 'refunded',
+      refund: { status: 'processed', amount: 500 },
+    };
+
+    assert.throws(() => applyRefundToPayment(payment, 500, 'REF-duplicate'));
+    assert.strictEqual(payment.refund.amount, 500);
   });
 });

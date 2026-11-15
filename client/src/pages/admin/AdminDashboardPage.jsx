@@ -205,14 +205,16 @@ export default function AdminDashboardPage() {
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                <span style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', fontWeight: 600 }}>GROSS REVENUE</span>
+                <span style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', fontWeight: 600 }}>GROSS CUSTOMER SALES</span>
                 <TrendingUp size={18} color="var(--color-accent-light)" />
               </div>
               <div style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--color-accent-light)' }}>
                 ₹{stats.totalRevenue.toLocaleString('en-IN')}
               </div>
               <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '0.35rem' }}>
-                Total settled tickets
+                Includes GST: ₹{(stats.gstCollected || 0).toLocaleString('en-IN')} · Base fare: ₹{(stats.baseFareRevenue || 0).toLocaleString('en-IN')}
+                <br />
+                Refunds: ₹{(stats.processedRefunds || 0).toLocaleString('en-IN')} · Net settled: ₹{(stats.netSettledReceipts || 0).toLocaleString('en-IN')}
               </div>
             </div>
 
@@ -551,9 +553,21 @@ export default function AdminDashboardPage() {
                       </div>
                     </div>
                     <div>
-                      <span style={{ color: 'var(--color-text-muted)' }}>Total Fare Collected</span>
+                      <span style={{ color: 'var(--color-text-muted)' }}>Base Fare Collected</span>
                       <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--color-accent-light)' }}>
-                        ₹{manifestData.reconciliation.totalFareCollected}
+                        ₹{manifestData.reconciliation.baseFareCollected}
+                      </div>
+                    </div>
+                    <div>
+                      <span style={{ color: 'var(--color-text-muted)' }}>GST Collected</span>
+                      <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--color-accent-light)' }}>
+                        ₹{manifestData.reconciliation.gstCollected}
+                      </div>
+                    </div>
+                    <div>
+                      <span style={{ color: 'var(--color-text-muted)' }}>Total Customer Amount Paid</span>
+                      <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--color-accent-light)' }}>
+                        ₹{manifestData.reconciliation.totalCustomerAmountPaid}
                       </div>
                     </div>
                   </div>
@@ -651,7 +665,7 @@ export default function AdminDashboardPage() {
                       <th style={{ padding: '0.75rem 0.5rem' }}>Booked</th>
                       <th style={{ padding: '0.75rem 0.5rem' }}>Available</th>
                       <th style={{ padding: '0.75rem 0.5rem' }}>Occupancy Rate</th>
-                      <th style={{ padding: '0.75rem 0.5rem' }}>Revenue</th>
+                      <th style={{ padding: '0.75rem 0.5rem' }}>Gross Customer Sales</th>
                     </tr>
                   </thead>
                   <tbody>

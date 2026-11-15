@@ -117,7 +117,7 @@ tripSchema.index({ operatorId: 1, departureDate: 1 });
 tripSchema.index({ busId: 1, departureDate: 1 });
 
 // ─── Auto-generate Trip Code ─────────────────────────────────────
-tripSchema.pre('save', function (next) {
+tripSchema.pre('save', function () {
   if (!this.tripCode) {
     const d = new Date(this.departureDate);
     const dateStr =
@@ -127,7 +127,6 @@ tripSchema.pre('save', function (next) {
     const randomHex = Math.random().toString(36).substring(2, 6).toUpperCase();
     this.tripCode = `TRIP-${dateStr}-${randomHex}`;
   }
-  next();
 });
 
 module.exports = mongoose.model('Trip', tripSchema);

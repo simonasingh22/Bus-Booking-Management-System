@@ -4,7 +4,66 @@ const Bus = require('../buses/Bus.model');
 const Operator = require('../operators/Operator.model');
 const Route = require('../routes/Route.model');
 const Seat = require('../seats/Seat.model');
+const Payment = require('../payments/Payment.model');
 const { AppError, asyncHandler, sendSuccess } = require('../../utils/helpers');
+
+const settledBookingFilter = {
+  bookingStatus: 'confirmed',
+  paymentStatus: 'paid',
+};
+
+const isSettledBooking = (booking) =>
+  booking?.bookingStatus === 'confirmed' && booking?.paymentStatus === 'paid';
+
+const calculateFinancials = (bookings, payments = []) => {
+  const paymentByBookingId = new Map(
+    payments.map((payment) => [payment.bookingId.toString(), payment])
+  );
+  const grossCustomerSales = bookings.reduce((sum, booking) => sum + (booking.totalAmount || 0), 0);
+  const baseFareRevenue = bookings.reduce((sum, booking) => sum + (booking.totalBaseFare || 0), 0);
+  const gstCollected = bookings.reduce((sum, booking) => sum + (booking.gstAmount || 0), 0);
+  const processedRefunds = payments.reduce(
+    (sum, payment) => sum + (payment.refund?.status === 'processed' ? payment.refund.amount || 0 : 0),
+    0
+  );
+
+  return {
+    grossCustomerSales,
+    baseFareRevenue,
+    gstCollected,
+    processedRefunds,
+    netSettledReceipts: grossCustomerSales - processedRefunds,
+    paymentByBookingId,
+  };
+};
+
+const getSettledBookings = async (filter = {}) => {
+  const payments = await Payment.find({ status: 'captured' });
+  const paymentBookingIds = payments.map((payment) => payment.bookingId);
+  const bookings = await Booking.find({
+    ...settledBookingFilter,
+    ...filter,
+    _id: { $in: paymentBookingIds },
+  });
+  const settledBookings = bookings.filter(isSettledBooking);
+  const bookingIds = new Set(settledBookings.map((booking) => booking._id.toString()));
+  return {
+    bookings: settledBookings,
+    payments: await Payment.find({ bookingId: { $in: [...bookingIds] } }),
+  };
+};
+
+const getProcessedRefunds = async (filter = {}) => {
+  const refundPayments = await Payment.find({
+    'refund.status': 'processed',
+  });
+  if (!Object.keys(filter).length) return refundPayments;
+
+  const bookingIds = refundPayments.map((payment) => payment.bookingId);
+  const bookings = await Booking.find({ _id: { $in: bookingIds }, ...filter }).select('_id');
+  const allowedBookingIds = new Set(bookings.map((booking) => booking._id.toString()));
+  return refundPayments.filter((payment) => allowedBookingIds.has(payment.bookingId.toString()));
+};
 
 /**
  * @desc    Get KPI metrics and performance stats (Admin/Operator)
@@ -13,19 +72,27 @@ const { AppError, asyncHandler, sendSuccess } = require('../../utils/helpers');
  */
 const getDashboardStats = asyncHandler(async (req, res) => {
   const query = {};
-  const bookingQuery = { bookingStatus: 'confirmed' };
   const busQuery = { status: 'active' };
 
   if (req.user.role === 'operator') {
     query.operatorId = req.user.operatorId;
-    bookingQuery.operatorId = req.user.operatorId;
     busQuery.operatorId = req.user.operatorId;
   }
 
   // 1. Confirmed Bookings & Revenue
-  const confirmedBookings = await Booking.find(bookingQuery);
+  const { bookings: confirmedBookings, payments } = await getSettledBookings(
+    req.user.role === 'operator' ? { operatorId: req.user.operatorId } : {}
+  );
+  const financials = calculateFinancials(confirmedBookings, payments);
+  const processedRefunds = await getProcessedRefunds(
+    req.user.role === 'operator' ? { operatorId: req.user.operatorId } : {}
+  );
+  financials.processedRefunds = processedRefunds.reduce(
+    (sum, payment) => sum + (payment.refund.amount || 0),
+    0
+  );
+  financials.netSettledReceipts = financials.grossCustomerSales - financials.processedRefunds;
   const totalBookings = confirmedBookings.length;
-  const totalRevenue = confirmedBookings.reduce((sum, b) => sum + (b.totalAmount || 0), 0);
 
   // 2. Active Trips & Occupancy
   const activeTrips = await Trip.find({ ...query, status: { $in: ['scheduled', 'boarding'] } })
@@ -35,10 +102,18 @@ const getDashboardStats = asyncHandler(async (req, res) => {
   const totalTripsCount = activeTrips.length;
   let aggregateTotalSeats = 0;
   let aggregateBookedSeats = 0;
+  const activeTripIds = new Set(activeTrips.map((trip) => trip._id.toString()));
+  const settledPassengersByTrip = new Map();
+  confirmedBookings.forEach((booking) => {
+    if (activeTripIds.has(booking.tripId.toString())) {
+      const current = settledPassengersByTrip.get(booking.tripId.toString()) || 0;
+      settledPassengersByTrip.set(booking.tripId.toString(), current + booking.passengers.length);
+    }
+  });
 
   activeTrips.forEach((t) => {
     aggregateTotalSeats += t.totalSeats || 0;
-    aggregateBookedSeats += Math.max(0, (t.totalSeats || 0) - (t.availableSeats || 0));
+    aggregateBookedSeats += settledPassengersByTrip.get(t._id.toString()) || 0;
   });
 
   const averageOccupancyPercent =
@@ -50,7 +125,9 @@ const getDashboardStats = asyncHandler(async (req, res) => {
   const totalBuses = await Bus.countDocuments(busQuery);
 
   // 4. Recent Bookings
-  const recentBookings = await Booking.find(bookingQuery)
+  const recentBookings = await Booking.find({
+    _id: { $in: confirmedBookings.map((booking) => booking._id) },
+  })
     .populate('tripId', 'departureDate departureTime')
     .populate('routeId', 'sourceCity destinationCity')
     .populate('operatorId', 'name')
@@ -59,7 +136,12 @@ const getDashboardStats = asyncHandler(async (req, res) => {
 
   sendSuccess(res, 200, 'Dashboard statistics retrieved.', {
     stats: {
-      totalRevenue,
+      totalRevenue: financials.grossCustomerSales,
+      grossCustomerSales: financials.grossCustomerSales,
+      baseFareRevenue: financials.baseFareRevenue,
+      gstCollected: financials.gstCollected,
+      processedRefunds: financials.processedRefunds,
+      netSettledReceipts: financials.netSettledReceipts,
       totalBookings,
       activeTrips: totalTripsCount,
       activeBuses: totalBuses,
@@ -96,15 +178,13 @@ const getTripManifest = asyncHandler(async (req, res, next) => {
     return next(new AppError('You do not have access to view this manifest.', 403));
   }
 
-  // Find all confirmed bookings for this trip
-  const confirmedBookings = await Booking.find({
-    tripId,
-    bookingStatus: 'confirmed',
-  }).sort({ createdAt: 1 });
+  // Only paid, captured bookings are financially settled and eligible for the manifest.
+  const { bookings: confirmedBookings, payments } = await getSettledBookings({ tripId });
+  confirmedBookings.sort((a, b) => a.createdAt - b.createdAt);
 
   // Reconcile passenger rows
   const manifestPassengers = [];
-  let totalRevenue = 0;
+  const financials = calculateFinancials(confirmedBookings, payments);
 
   confirmedBookings.forEach((b) => {
     b.passengers.forEach((p) => {
@@ -123,7 +203,6 @@ const getTripManifest = asyncHandler(async (req, res, next) => {
         pnr: b.pnr,
         fare: p.fare,
       });
-      totalRevenue += p.fare;
     });
   });
 
@@ -153,7 +232,11 @@ const getTripManifest = asyncHandler(async (req, res, next) => {
       bookedSeatsCount,
       vacantSeatsCount,
       occupancyPercentage,
-      totalFareCollected: totalRevenue,
+      baseFareCollected: financials.baseFareRevenue,
+      gstCollected: financials.gstCollected,
+      totalCustomerAmountPaid: financials.grossCustomerSales,
+      // Deprecated compatibility alias; this now has an explicit base-fare meaning.
+      totalFareCollected: financials.baseFareRevenue,
     },
     manifest: manifestPassengers,
   });
@@ -182,22 +265,13 @@ const getOccupancySummary = asyncHandler(async (req, res) => {
 
   const reportItems = await Promise.all(
     trips.map(async (trip) => {
-      const bookingsCount = await Booking.countDocuments({
-        tripId: trip._id,
-        bookingStatus: 'confirmed',
-      });
-
-      const confirmedBookings = await Booking.find({
-        tripId: trip._id,
-        bookingStatus: 'confirmed',
-      });
+      const { bookings: confirmedBookings, payments } = await getSettledBookings({ tripId: trip._id });
 
       let totalPassengers = 0;
-      let revenue = 0;
       confirmedBookings.forEach((b) => {
         totalPassengers += b.passengers.length;
-        revenue += b.totalAmount;
       });
+      const financials = calculateFinancials(confirmedBookings, payments);
 
       const totalSeats = trip.busId?.totalSeats || trip.totalSeats;
       const occupancyRate =
@@ -216,7 +290,12 @@ const getOccupancySummary = asyncHandler(async (req, res) => {
         bookedSeats: totalPassengers,
         availableSeats: Math.max(0, totalSeats - totalPassengers),
         occupancyRate,
-        revenue,
+        revenue: financials.grossCustomerSales,
+        grossCustomerSales: financials.grossCustomerSales,
+        baseFareRevenue: financials.baseFareRevenue,
+        gstCollected: financials.gstCollected,
+        processedRefunds: financials.processedRefunds,
+        netSettledReceipts: financials.netSettledReceipts,
       };
     })
   );
@@ -231,4 +310,7 @@ module.exports = {
   getDashboardStats,
   getTripManifest,
   getOccupancySummary,
+  calculateFinancials,
+  getSettledBookings,
+  isSettledBooking,
 };

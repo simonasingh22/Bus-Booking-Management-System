@@ -1,5 +1,9 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
+const {
+  calculateFinancials,
+  isSettledBooking,
+} = require('../modules/reports/reports.controller');
 
 describe('Reports & Passenger Manifest Unit Tests', () => {
   it('should calculate accurate seat occupancy percentages', () => {
@@ -73,5 +77,66 @@ describe('Reports & Passenger Manifest Unit Tests', () => {
     assert.ok(log.entityType);
     assert.ok(log.timestamp instanceof Date);
     assert.strictEqual(log.action, 'BOOKING_CONFIRM');
+  });
+
+  it('should report base fare, GST, gross sales, refunds and net settled receipts separately', () => {
+    const bookings = [
+      {
+        _id: 'booking-1',
+        totalBaseFare: 1199,
+        gstAmount: 60,
+        totalAmount: 1259,
+      },
+    ];
+    const payments = [
+      {
+        bookingId: 'booking-1',
+        refund: { status: 'none', amount: 0 },
+      },
+    ];
+
+    assert.deepStrictEqual(
+      calculateFinancials(bookings, payments),
+      {
+        grossCustomerSales: 1259,
+        baseFareRevenue: 1199,
+        gstCollected: 60,
+        processedRefunds: 0,
+        netSettledReceipts: 1259,
+        paymentByBookingId: new Map([['booking-1', payments[0]]]),
+      }
+    );
+  });
+
+  it('should exclude cancelled and confirmed-but-unpaid bookings from settled reports', () => {
+    assert.strictEqual(isSettledBooking({ bookingStatus: 'confirmed', paymentStatus: 'paid' }), true);
+    assert.strictEqual(isSettledBooking({ bookingStatus: 'cancelled', paymentStatus: 'paid' }), false);
+    assert.strictEqual(isSettledBooking({ bookingStatus: 'confirmed', paymentStatus: 'pending' }), false);
+    assert.strictEqual(isSettledBooking({ bookingStatus: 'confirmed', paymentStatus: 'failed' }), false);
+  });
+
+  it('should count occupancy only from settled bookings', () => {
+    const bookings = [
+      { bookingStatus: 'confirmed', paymentStatus: 'paid', passengers: [{ seatNumber: 'A1' }] },
+      { bookingStatus: 'cancelled', paymentStatus: 'paid', passengers: [{ seatNumber: 'A2' }] },
+      { bookingStatus: 'confirmed', paymentStatus: 'pending', passengers: [{ seatNumber: 'A3' }] },
+    ];
+
+    const occupiedSeats = bookings
+      .filter(isSettledBooking)
+      .reduce((count, booking) => count + booking.passengers.length, 0);
+
+    assert.strictEqual(occupiedSeats, 1);
+  });
+
+  it('should subtract only processed refunds from net settled receipts', () => {
+    const financials = calculateFinancials(
+      [{ totalBaseFare: 1199, gstAmount: 60, totalAmount: 1259 }],
+      [{ bookingId: 'booking-1', refund: { status: 'processed', amount: 500 } }]
+    );
+
+    assert.strictEqual(financials.grossCustomerSales, 1259);
+    assert.strictEqual(financials.processedRefunds, 500);
+    assert.strictEqual(financials.netSettledReceipts, 759);
   });
 });

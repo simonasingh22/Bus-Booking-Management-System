@@ -210,6 +210,13 @@ export default function CheckoutPage() {
 
   const completeBooking = async ({ razorpayOrderId, razorpayPaymentId, razorpaySignature, idempotencyKey }) => {
     try {
+      await api.post('/payments/verify', {
+        razorpayOrderId,
+        razorpayPaymentId,
+        razorpaySignature,
+        isSimulation: !razorpaySignature,
+      });
+
       const payload = {
         tripId: checkoutData.trip._id,
         passengers,

@@ -1,8 +1,17 @@
 const crypto = require('crypto');
 const Payment = require('./Payment.model');
-const Booking = require('../bookings/Booking.model');
 const { AppError, asyncHandler, sendSuccess } = require('../../utils/helpers');
 const { logAuditAction } = require('../../middleware/audit');
+
+const isValidRazorpaySignature = (orderId, paymentId, signature, secret) => {
+  if (!orderId || !paymentId || !signature || !secret || secret === 'placeholder_secret') return false;
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(`${orderId}|${paymentId}`)
+    .digest('hex');
+  if (expected.length !== signature.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+};
 
 /**
  * @desc    Create Razorpay Order (Test Mode)
@@ -50,19 +59,21 @@ const createOrder = asyncHandler(async (req, res, next) => {
     }
   }
 
-  // Create or update initial payment entry
-  let paymentDoc = null;
-  if (bookingId) {
-    paymentDoc = await Payment.create({
-      bookingId,
-      userId: req.user._id,
-      amount: Number(amount),
-      currency,
-      gateway: 'razorpay',
-      razorpayOrderId: orderId,
-      status: 'created',
-    });
-  }
+  const paymentDoc = await Payment.findOneAndUpdate(
+    { razorpayOrderId: orderId, userId: req.user._id },
+    {
+      $setOnInsert: {
+        ...(bookingId ? { bookingId } : {}),
+        userId: req.user._id,
+        amount: Number(amount),
+        currency,
+        gateway: 'razorpay',
+        razorpayOrderId: orderId,
+        status: 'created',
+      },
+    },
+    { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+  );
 
   await logAuditAction({
     req,
@@ -102,20 +113,11 @@ const verifyPayment = asyncHandler(async (req, res, next) => {
 
   const keySecret = process.env.RAZORPAY_KEY_SECRET || 'placeholder_secret';
 
-  // 1. Signature Verification
-  let isValid = false;
-
-  if (isSimulation || keySecret === 'placeholder_secret') {
-    // Evaluation test simulation bypass
-    isValid = true;
-  } else if (razorpaySignature) {
-    const generatedSignature = crypto
-      .createHmac('sha256', keySecret)
-      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-      .digest('hex');
-
-    isValid = generatedSignature === razorpaySignature;
-  }
+  // Simulation is explicitly separate from Razorpay. Real Razorpay payments always
+  // require a backend HMAC signature check with a configured test secret.
+  const isValid = isSimulation
+    ? true
+    : isValidRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature, keySecret);
 
   if (!isValid) {
     await logAuditAction({
@@ -128,26 +130,26 @@ const verifyPayment = asyncHandler(async (req, res, next) => {
     return next(new AppError('Payment signature verification failed.', 400));
   }
 
-  // 2. Update Payment Document
-  let payment = await Payment.findOne({ razorpayOrderId });
+  // 2. Update Payment Document. Repeated verification returns the same payment.
+  let payment = await Payment.findOne({ razorpayOrderId, userId: req.user._id });
   if (!payment && bookingId) {
-    payment = await Payment.findOne({ bookingId });
+    payment = await Payment.findOne({ bookingId, userId: req.user._id });
   }
 
-  if (payment) {
+  if (!payment) {
+    return next(new AppError('Payment order was not found for this account.', 404));
+  }
+
+  if (payment.status === 'refunded') {
+    return next(new AppError('This payment has already been refunded.', 409));
+  }
+
+  if (payment.status !== 'captured') {
     payment.status = 'captured';
+    payment.gateway = isSimulation ? 'test_simulation' : 'razorpay';
     payment.razorpayPaymentId = razorpayPaymentId;
-    payment.razorpaySignature = razorpaySignature || 'simulated_signature';
+    payment.razorpaySignature = razorpaySignature || null;
     await payment.save();
-  }
-
-  // 3. Update Booking Status
-  if (bookingId) {
-    await Booking.findByIdAndUpdate(bookingId, {
-      paymentStatus: 'paid',
-      bookingStatus: 'confirmed',
-      ...(payment && { paymentId: payment._id }),
-    });
   }
 
   await logAuditAction({
@@ -187,4 +189,5 @@ module.exports = {
   createOrder,
   verifyPayment,
   getPaymentById,
+  isValidRazorpaySignature,
 };

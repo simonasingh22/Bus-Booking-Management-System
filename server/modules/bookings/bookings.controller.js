@@ -117,6 +117,20 @@ const createBooking = asyncHandler(async (req, res, next) => {
   const discountAmount = 0;
   const totalAmount = totalBaseFare + gstAmount - discountAmount;
 
+  const verifiedPayment = await Payment.findOne({
+    userId: req.user._id,
+    razorpayOrderId,
+    razorpayPaymentId,
+    status: 'captured',
+    amount: totalAmount,
+  });
+  if (!verifiedPayment) {
+    return next(new AppError('Payment must be verified before confirming the booking.', 402));
+  }
+  if (verifiedPayment.bookingId) {
+    return next(new AppError('This payment is already linked to a booking.', 409));
+  }
+
   // 5. Create Booking Record
   const booking = await Booking.create({
     userId: req.user._id,
@@ -134,7 +148,7 @@ const createBooking = asyncHandler(async (req, res, next) => {
     droppingPoint,
     contactDetails,
     bookingStatus: 'confirmed',
-    paymentStatus: 'paid', // Test mode auto-settled
+    paymentStatus: 'paid',
     idempotencyKey,
   });
 
@@ -157,19 +171,10 @@ const createBooking = asyncHandler(async (req, res, next) => {
   trip.availableSeats = Math.max(0, trip.availableSeats - passengers.length);
   await trip.save();
 
-  // 8. Create Payment Record (Simulated or Razorpay Test Mode)
-  const payment = await Payment.create({
-    bookingId: booking._id,
-    userId: req.user._id,
-    amount: totalAmount,
-    currency: 'INR',
-    gateway: 'razorpay',
-    razorpayOrderId: razorpayOrderId || `order_sim_${Date.now()}`,
-    razorpayPaymentId: razorpayPaymentId || `pay_sim_${Date.now()}`,
-    status: 'captured',
-  });
-
-  booking.paymentId = payment._id;
+  // 8. Link the already verified payment; never create a second payment record.
+  verifiedPayment.bookingId = booking._id;
+  await verifiedPayment.save();
+  booking.paymentId = verifiedPayment._id;
   await booking.save();
 
   // 9. Log Material Audit Action
@@ -194,7 +199,7 @@ const createBooking = asyncHandler(async (req, res, next) => {
 
   sendSuccess(res, 201, 'Booking confirmed successfully!', {
     booking: populatedBooking,
-    payment,
+    payment: verifiedPayment,
   });
 });
 

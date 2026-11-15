@@ -195,11 +195,10 @@ bookingSchema.index({ tripId: 1, bookingStatus: 1 });
 bookingSchema.index({ operatorId: 1, createdAt: -1 });
 
 // ─── Auto-generate PNR ───────────────────────────────────────────
-bookingSchema.pre('save', function (next) {
+bookingSchema.pre('save', function () {
   if (!this.pnr) {
     this.pnr = generatePNR();
   }
-  next();
 });
 
 module.exports = mongoose.model('Booking', bookingSchema);

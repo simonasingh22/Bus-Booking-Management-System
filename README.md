@@ -138,6 +138,43 @@ Add the public key ID to `client/.env`:
 VITE_RAZORPAY_KEY_ID=rzp_test_...
 ```
 
+### Razorpay sandbox test steps
+
+1. Create a Razorpay account in **Test Mode** and generate a test key pair.
+2. Put the key ID and secret only in `server/.env` as `RAZORPAY_KEY_ID` and
+   `RAZORPAY_KEY_SECRET`. Put only the public `rzp_test_...` key ID in
+   `client/.env` as `VITE_RAZORPAY_KEY_ID`.
+3. Start MongoDB, the backend, and the frontend:
+   ```
+   cd server
+   npm install
+   npm run seed
+   npm start
+
+   cd ../client
+   npm install
+   npm run dev
+   ```
+4. Sign in, select seats, and choose **Razorpay Test Gateway** (not
+   **Instant Test Payment**). The checkout modal must use a `rzp_test_...` key.
+5. Complete checkout with Razorpay's published test card/UPI details. The
+   frontend sends the callback values to `POST /api/payments/verify`; the
+   backend verifies `HMAC-SHA256(order_id|payment_id)` before the booking is
+   confirmed.
+6. To test a failed or cancelled checkout, close the Razorpay modal or use a
+   failed sandbox instrument. No confirmed booking, captured payment, or
+   permanently consumed seat should be created.
+7. Retry the same callback or verification request. It must remain idempotent
+   and reuse the existing payment record.
+8. **Instant Test Payment** is a separate local simulation path. It does not
+   contact Razorpay, uses `gateway: test_simulation`, and is useful when no
+   sandbox credentials are configured.
+
+The backend never trusts a frontend success callback by itself. Razorpay test
+credentials must remain environment variables; never commit the secret or use
+`rzp_live_` keys. Refunds are simulated locally by updating the payment refund
+state and do not call a Razorpay refund API.
+
 ---
 
 ## ⚠️ Known Limitations
